@@ -48,14 +48,20 @@ const DRIFT_HOURS = Number(process.env.DRIFT_HOURS ?? 40);
 /** Shrinkage: a drift from n points is multiplied by n / (n + SHRINK_K). */
 const SHRINK_K = Number(process.env.SHRINK_K ?? 4);
 /** Cap on |drift| per hour, to keep noisy regressions from exploding. */
-const MAX_DRIFT = Number(process.env.MAX_DRIFT ?? 0.03);
+const MAX_DRIFT = Number(process.env.MAX_DRIFT ?? 0.1);
 /** Global multiplier on all drifts (0 = no momentum, 1 = full). Half
  * momentum scores best: full momentum overcommits to the incumbent #1. */
 const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 0.5);
+/** Growth-momentum coefficient: how much a game's recent player-count
+ * growth rate (log playing per hour) shifts its log-rank drift. Negative:
+ * a growing game climbs (its log-rank falls). Measured at about -0.2 to
+ * -0.35 on the history; tune by sweeping. 0 disables it. */
+const GROWTH_BETA = Number(process.env.GROWTH_BETA ?? -0.5);
 
 interface ChartGame {
   rank: number;
   universe_id: number;
+  playing?: number;
 }
 
 interface Snapshot {
@@ -108,19 +114,20 @@ function main(): void {
   const snaps = lines.map((l) => JSON.parse(l) as Snapshot);
   const t0 = Date.parse(snaps[0]!.at);
 
-  // Per-game rank history: universe_id -> [{tHours, logRank}].
-  const perGame = new Map<number, Array<{ t: number; lr: number }>>();
+  // Per-game history: universe_id -> [{tHours, logRank, logPlaying}].
+  const perGame = new Map<number, Array<{ t: number; lr: number; lp: number }>>();
   const lastRank = new Map<number, number>();
   for (const s of snaps) {
     const t = (Date.parse(s.at) - t0) / 3600000;
     for (const g of s.up_and_coming) {
       const lr = Math.log(g.rank);
+      const lp = g.playing != null && g.playing > 0 ? Math.log(g.playing) : NaN;
       let arr = perGame.get(g.universe_id);
       if (!arr) {
         arr = [];
         perGame.set(g.universe_id, arr);
       }
-      arr.push({ t, lr });
+      arr.push({ t, lr, lp });
       lastRank.set(g.universe_id, g.rank);
     }
   }
@@ -152,6 +159,28 @@ function main(): void {
       // Shrink toward the global mean drift (~0), scale, and cap.
       drift *= n / (n + SHRINK_K);
       drift *= DRIFT_SCALE;
+      // Growth momentum: a game whose player count is growing climbs.
+      // growth = slope of log(playing) on time over the same window.
+      if (GROWTH_BETA !== 0) {
+        const gp = pts.filter((p) => Number.isFinite(p.lp));
+        if (gp.length >= 2) {
+          let mt = 0;
+          let mp = 0;
+          for (const p of gp) {
+            mt += p.t;
+            mp += p.lp;
+          }
+          mt /= gp.length;
+          mp /= gp.length;
+          let gnum = 0;
+          let gden = 0;
+          for (const p of gp) {
+            gnum += (p.t - mt) * (p.lp - mp);
+            gden += (p.t - mt) * (p.t - mt);
+          }
+          if (gden > 0) drift += GROWTH_BETA * (gnum / gden);
+        }
+      }
       if (drift > MAX_DRIFT) drift = MAX_DRIFT;
       if (drift < -MAX_DRIFT) drift = -MAX_DRIFT;
     }
