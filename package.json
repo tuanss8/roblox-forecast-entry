@@ -1,1 +1,8 @@
-{"private":true,"type":"module"}
+{
+  "name": "roblox-forecast-entry",
+  "version": "2.0.0",
+  "description": "Roblox Up-and-Coming forecaster v2: growth momentum + MAX_DRIFT 0.10 + Student-t(3)",
+  "type": "module",
+  "main": "main.ts",
+  "license": "MIT"
+}

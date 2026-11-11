@@ -57,6 +57,11 @@ const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 0.5);
  * a growing game climbs (its log-rank falls). Measured at about -0.2 to
  * -0.35 on the history; tune by sweeping. 0 disables it. */
 const GROWTH_BETA = Number(process.env.GROWTH_BETA ?? -0.5);
+/** Student-t degrees of freedom for the log-rank increments. The history's
+ * log-rank changes have excess kurtosis 11.7 (Gaussian 0), so a Gaussian
+ * badly underestimates viral jumps; a t with ~4-5 dof matches. 0 (or
+ * unset) means Gaussian. */
+const T_DOF = Number(process.env.T_DOF ?? 3);
 
 interface ChartGame {
   rank: number;
@@ -97,6 +102,24 @@ function makeGaussian(rng: () => number): () => number {
     const t = 2 * Math.PI * u2;
     spare = r * Math.sin(t);
     return r * Math.cos(t);
+  };
+}
+
+/** Student-t generator (integer dof): T = Z / sqrt(Chi2_nu / nu), scaled
+ * to unit variance by sqrt((nu-2)/nu). Falls back to the plain Gaussian
+ * when dof <= 2. */
+function makeStudentT(rng: () => number, dof: number): () => number {
+  const randn = makeGaussian(rng);
+  if (dof <= 2) return randn;
+  const scale = Math.sqrt((dof - 2) / dof);
+  return () => {
+    const z = randn();
+    let chi2 = 0;
+    for (let k = 0; k < dof; k++) {
+      const w = randn();
+      chi2 += w * w;
+    }
+    return (z / Math.sqrt(chi2 / dof)) * scale;
   };
 }
 
@@ -195,7 +218,7 @@ function main(): void {
   const counts = new Float64Array(n * places);
   const rankSum = new Float64Array(n);
   const rng = mulberry32(20261112);
-  const randn = makeGaussian(rng);
+  const randn = T_DOF > 0 ? makeStudentT(rng, T_DOF) : makeGaussian(rng);
   const cur = new Float64Array(n);
   const idx = new Array<number>(n);
   for (let i = 0; i < n; i++) idx[i] = i;

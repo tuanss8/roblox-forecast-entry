@@ -46,5 +46,5 @@ Node 22, standard library only.
 
 On the kit's practice instance (history to 2026-11-07, window to
 2026-11-10), scored against the 10 archive reads in the window, this
-forecast scores a log score of about **-33.3**, against the house
+forecast scores a log score of about **-33.2**, against the house
 baseline's -43.5 and the house model's -37.2.
