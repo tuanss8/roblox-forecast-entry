@@ -1,37 +1,37 @@
-// roblox-up-and-coming-forecast-01 entry v9: HYBRID fitted place-occupancy
-// table (v8, refined) tilted by a low-volatility rank-dynamics ordering,
-// with the v8 Monte Carlo fallback on sparse history. Rank 1 is robekk
-// "Fitted place-occupancy table" at -13.2 (p 0.2674); rank 2 is achmadb271
-// "SINDRI Roblox Momentum Diffusion" -13.7 (agreement 75.5 vs robekk's
-// 59.3). Our v5 official is rank 4 at -26.0 (p 0.0745). The best Monte
-// Carlo on practice (side-chat v6: HORIZONS 60,72,84, VOL 0.06, TEMP 1.35)
-// scores -25.425 (p 0.0787) and is the fallback here. v8's refined table
-// scores -34.20 forced-fit on practice (held-out harness -42.71).
+// roblox-up-and-coming-forecast-01 entry v10: PRODUCT-OF-EXPERTS blend
+// of the v8 refined fitted place-occupancy table with the Monte Carlo's
+// full per-place distribution, with the v8 Monte Carlo fallback on
+// sparse history. Rank 1 is robekk "Fitted place-occupancy table" at
+// -13.2 (p 0.2674); rank 2 is achmadb271 "SINDRI Roblox Momentum
+// Diffusion" -13.7 (agreement 75.5 vs robekk's 59.3). Our v5 official
+// is rank 4 at -26.0 (p 0.0787). The best Monte Carlo on practice
+// (side-chat v6: HORIZONS 60,72,84, VOL 0.06, TEMP 1.35) scores
+// -25.425 (p 0.0787) and is the fallback here. v8's refined table
+// scores -34.20 forced-fit on practice (held-out harness -42.71);
+// v9's kernel tilt (table x Gaussian around the MC conditional mean
+// rank) scores -32.60 forced-fit but LOSES on the rolling harness
+// (-42.45 vs the pure table's -40.64).
 //
-// WHY the hybrid: the research (roblox-log-minus13-howto.md) found that
-// the -13.28 "oracle" was in-sample inflated (honest leave-one-out oracle
-// -31.23), no conditional signal adds score on practice, and the official
-// window is a "stable set, shuffling places" regime: the same ~10-12 games
-// rotate among places 1-10. A table captures the SET (mass on the right
-// games at each place); a dynamics model orders the PLACES better
-// (achmadb271's agreement 75.5 vs robekk's 59.3). v9 therefore keeps v8's
-// table as the MASS and tilts it with a LOW-VOLATILITY rank-dynamics
-// ordering: each game's predicted rank at +72 h (drift-only point
-// estimate, no diffusion noise) defines a narrow Gaussian kernel in
-// log-rank around that rank, and the table's per-place probabilities are
-// multiplied by kernel^HYBRID_BETA and renormalised. The gap to -13 is
-// 0.20 log points = +1.9% relative p per cell; closing it requires the
-// estimator to be a touch closer to the truth than robekk's. The hybrid
-// is the one untested method that could do it, and it is tuned on the
-// practice forced-fit (see the status file): the MC-ordering tilt gains
-// +1.6 there. NOTE the evidence is mixed — on the rolling held-out
-// harness (truncated 16-24-snap histories) the same tilt LOSES 1.0-1.8
-// points, because the ordering signal is noisier on short history. The
-// tilt is therefore a bet that the final history is fresh and dense
-// (it is, by construction: hourly house reads up to the deadline), the
-// regime where the ordering signal is best. On sparse history (like
-// the 34-snapshot practice history) the density gate keeps the Monte
-// Carlo, verified at -25.425 on practice.
+// WHY product-of-experts (v10): v9's tilt uses only the MC's
+// conditional mean rank (one number per game) and throws away the
+// shape of the MC's place distribution. v10 blends the table
+// geometrically with the MC's FULL per-place distribution:
+// P ∝ table^(1-POE_W) × MC^POE_W, renormalised per place. On the
+// practice forced-fit this gains +1.03 over v9 at POE_W 0.25 (-31.57
+// vs -32.60) and up to +4.91 at 0.75 (-27.69) — but on the honest
+// rolling held-out harness only the LOW weight gains: w0.25 scores
+// -40.47 vs the pure table's -40.64 (+0.17, the only config that
+// beats it) and vs v9's tilt -42.45 (+1.98); w0.5 (-41.63) and w0.75
+// (-42.81) both lose. The weight must stay low because on the dense
+// final history the table's sharp peaks are REAL signal (robekk's
+// -13.2 depends on them) and a high weight would flatten them toward
+// the MC's diffuse distribution. POE_W 0.25 is the only weight that
+// gains on BOTH the forced-fit and the harness, and it preserves the
+// table's mass while letting the MC reorder within it. The gap to
+// -13.1 (0.1 better than robekk's -13.2) is +1% relative p per cell;
+// v10 is the next step toward it after v9, but -13.1 remains a
+// stretch (~15-25%): it needs robekk's estimator to leave ≥0.1 on
+// the table AND the final window to stay in the stable-set regime.
 //
 // Deterministic: a seeded PRNG (mulberry32) drives the Monte Carlo, so
 // two runs on the same history write byte-identical forecasts. The
@@ -69,6 +69,13 @@ const FIT_PRIOR_SCALE = Number(process.env.FIT_PRIOR_SCALE ?? 4);
  * (<1 flattens). 0.85 (v8): mild hedge against overconfident fitted
  * frequencies. */
 const FIT_TEMP = Number(process.env.FIT_TEMP ?? 0.85);
+/** Fitted table: optional per-place temperature (v10, Idea 2). When both
+ * are set they override FIT_TEMP: FIT_TEMP_HI at place 1, FIT_TEMP_LO at
+ * the last place, linearly interpolated. Top places are more concentrated
+ * (modal share 0.3-0.7) so they may want less flattening than the
+ * diffuse bottom places. NaN (default) = use FIT_TEMP. */
+const FIT_TEMP_HI = Number(process.env.FIT_TEMP_HI ?? NaN);
+const FIT_TEMP_LO = Number(process.env.FIT_TEMP_LO ?? NaN);
 /** Fitted table: its own unnamed share (the Monte Carlo keeps
  * UNNAMED_HI/LO). The fitted table leaves more unnamed mass at the
  * bottom places (0.25/0.15), where turnover/newcomers are more common;
@@ -88,6 +95,13 @@ const HYBRID_BETA = Number(process.env.HYBRID_BETA ?? 1.0);
  * distinguishes nearby places. Prototype plateau: BETA 0.5-2.0 x sigma
  * 0.35-0.75 all score about -32.8 on the practice forced-fit. */
 const DYN_SIGMA = Number(process.env.DYN_SIGMA ?? 0.5);
+/** Product-of-experts blend weight (v10, Idea 3): when DYN_SOURCE is
+ * "poe", the fitted table is blended geometrically with the Monte
+ * Carlo's full per-place distribution: P ∝ table^(1-POE_W) × MC^POE_W,
+ * renormalised per place. v9's kernel tilt uses only the MC's
+ * conditional mean rank (one number per game); the PoE uses the MC's
+ * whole place distribution (its shape, not just its mean). */
+const POE_W = Number(process.env.POE_W ?? 0.25);
 /** Hybrid horizon (v9): hours ahead for the drift-predicted rank
  * (only used when DYN_SOURCE is "drift"). */
 const DYN_HORIZON_H = Number(process.env.DYN_HORIZON_H ?? 72);
@@ -97,8 +111,10 @@ const DYN_HORIZON_H = Number(process.env.DYN_HORIZON_H ?? 72);
  * practice forced-fit); "drift" = the drift-only point estimate, which
  * does NOT help (momentum does not persist 72 h: every drift-tilt
  * config scored worse than the pure table on practice and on the
- * harness). */
-const DYN_SOURCE = process.env.DYN_SOURCE ?? 'mc';
+ * harness). "poe" = product-of-experts blend with the MC's full
+ * per-place distribution (see POE_W); the Gaussian kernel tilt is
+ * skipped in that mode. */
+const DYN_SOURCE = process.env.DYN_SOURCE ?? 'poe';
 /** Hybrid ordering MC paths (v9): paths for the reduced Monte Carlo
  * that supplies the ordering when DYN_SOURCE is "mc". 2000 paths is
  * enough for a stable mean rank and costs ~15 s in the fitted branch. */
@@ -426,7 +442,7 @@ function predictedLogRank(snaps: Snapshot[]): Map<number, number> {
  * recent snapshots the frequencies are noise (measured on practice: raw
  * table -46 to -53; refined table still below the Monte Carlo on sparse
  * data, see the status file). */
-function fittedTable(snaps: Snapshot[], places: number, predLr?: Map<number, number>): {
+function fittedTable(snaps: Snapshot[], places: number, predLr?: Map<number, number>, mcPlace?: Map<number, number[]>): {
   probabilities: Array<{ universe_id: number; place: number; p: number }>;
   top10: number[];
 } {
@@ -478,11 +494,14 @@ function fittedTable(snaps: Snapshot[], places: number, predLr?: Map<number, num
       }
     }
     let entries = [...post.entries()];
-    if (FIT_TEMP !== 1) {
+    const placeTemp = Number.isFinite(FIT_TEMP_HI) && Number.isFinite(FIT_TEMP_LO)
+      ? FIT_TEMP_HI + ((FIT_TEMP_LO - FIT_TEMP_HI) * place) / (places - 1)
+      : FIT_TEMP;
+    if (placeTemp !== 1) {
       const totP = entries.reduce((a, [, v]) => a + v, 0);
-      const totT = entries.reduce((a, [, v]) => a + Math.pow(v, FIT_TEMP), 0);
+      const totT = entries.reduce((a, [, v]) => a + Math.pow(v, placeTemp), 0);
       if (totT > 0 && totP > 0) {
-        entries = entries.map(([uid, v]) => [uid, (Math.pow(v, FIT_TEMP) / totT) * totP] as [number, number]);
+        entries = entries.map(([uid, v]) => [uid, (Math.pow(v, placeTemp) / totT) * totP] as [number, number]);
       }
     }
     // Hybrid tilt (v9): multiply by kernel^HYBRID_BETA, the kernel a
@@ -501,6 +520,27 @@ function fittedTable(snaps: Snapshot[], places: number, predLr?: Map<number, num
         const d = lr - lnPlace;
         const k = Math.exp(-d * d * inv2s2);
         return [uid, v * Math.pow(k, HYBRID_BETA)] as [number, number];
+      });
+      let totPost = 0;
+      for (const [, v] of entries) totPost += v;
+      if (totPost > 0 && totPre > 0) {
+        entries = entries.map(([uid, v]) => [uid, (v / totPost) * totPre] as [number, number]);
+      }
+    }
+    // Product-of-experts blend (v10, DYN_SOURCE "poe"): blend the table
+    // posterior geometrically with the MC's per-place distribution.
+    // mcPlace maps uid -> per-place probabilities (normalised per place
+    // across games). Games missing from the MC keep their table value
+    // (factor 1) instead of being zeroed.
+    if (POE_W > 0 && mcPlace && mcPlace.size > 0) {
+      let totPre = 0;
+      for (const [, v] of entries) totPre += v;
+      entries = entries.map(([uid, v]) => {
+        const mc = mcPlace.get(uid);
+        if (!mc) return [uid, v] as [number, number];
+        const m = mc[place] ?? 0;
+        if (m <= 0) return [uid, v] as [number, number];
+        return [uid, Math.pow(v, 1 - POE_W) * Math.pow(m, POE_W)] as [number, number];
       });
       let totPost = 0;
       for (const [, v] of entries) totPost += v;
@@ -663,6 +703,30 @@ function runMC(snaps: Snapshot[], places: number, hours: number, paths: number):
   return { counts, rankSum, ids, n, totalSamples };
 }
 
+/** MC per-place distribution (v10, PoE): run the reduced Monte Carlo
+ * and return, per game, its per-place probabilities normalised per
+ * place across games: out[uid][place] = P_MC(uid at place). Unlike the
+ * v9 kernel tilt (which uses only the conditional mean rank), this keeps
+ * the MC's whole place distribution. */
+function mcPlaceDist(snaps: Snapshot[], places: number, hours: number): Map<number, number[]> {
+  const { counts, ids, n } = runMC(snaps, places, hours, MCORD_PATHS);
+  const colSum = new Float64Array(places);
+  for (let i = 0; i < n; i++) {
+    for (let place = 0; place < places; place++) {
+      colSum[place] += counts[i * places + place]!;
+    }
+  }
+  const out = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const arr: number[] = [];
+    for (let place = 0; place < places; place++) {
+      arr.push(colSum[place]! > 0 ? counts[i * places + place]! / colSum[place]! : 0);
+    }
+    out.set(ids[i]!, arr);
+  }
+  return out;
+}
+
 /** Dynamics ordering for the hybrid tilt (v9): per-game log of the
  * conditional mean rank. Source "mc" (default): run the reduced Monte
  * Carlo and take, per game, the mean simulated place given the game is
@@ -711,8 +775,9 @@ function main(): void {
     if (FORCE_FIT || (snaps.length >= DENSE_MIN_SNAPS && medGap <= DENSE_MAX_GAP_H)) {
       // Hybrid (v9): the dynamics ordering tilts the table. Skip the
       // (expensive for "mc") ordering computation when the tilt is off.
-      const predLr = HYBRID_BETA !== 0 ? dynamicsLogRank(snaps, places, hours) : undefined;
-      const { probabilities, top10 } = fittedTable(snaps, places, predLr);
+      const predLr = HYBRID_BETA !== 0 && DYN_SOURCE !== 'poe' ? dynamicsLogRank(snaps, places, hours) : undefined;
+      const mcPlace = DYN_SOURCE === 'poe' ? mcPlaceDist(snaps, places, hours) : undefined;
+      const { probabilities, top10 } = fittedTable(snaps, places, predLr, mcPlace);
       writeFileSync(join(OUTPUT_DIR, task.output), `${JSON.stringify({ probabilities, top10 })}\n`);
       return;
     }
