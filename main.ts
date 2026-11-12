@@ -1,5 +1,28 @@
-// roblox-up-and-coming-forecast-01 entry v10: PRODUCT-OF-EXPERTS blend
-// of the v8 refined fitted place-occupancy table with the Monte Carlo's
+// roblox-up-and-coming-forecast-01 entry v11: SHARP LOTTERY variant of
+// the v10 product-of-experts blend — same v8 refined fitted
+// place-occupancy table x Monte Carlo full per-place distribution, but
+// with a SHARP configuration aimed at p_place 0.28 (log -12.73):
+// FIT_TEMP_HI=1.5 / FIT_TEMP_LO=0.85 (per-place temperature: sharpen
+// the top place, flatten the bottom), FIT_HALFLIFE_H=6 (short recency
+// window), POE_W=0.5 (half MC). This is a DELIBERATE LOTTERY BET on
+// the final window (13-16 Nov) being ultra-stable: every sharp config
+// gains on the practice forced-fit and LOSES on the honest rolling
+// held-out harness, so v11 is expected to be WORSE than v10 unless the
+// final window is far more concentrated than practice. v10 stays the
+// submit; v11 is only a lottery ticket, NOT the submit.
+//
+// MEASURED (practice, 2026-11-12): forced-fit -30.19 (p 0.0489, hits
+// 7.20, agr 62.4) = +1.38 vs v10's -31.57; harness -41.87 (p 0.0152,
+// hits 4.99, agr 35.8) = -1.40 vs v10's -40.47; default MC fallback
+// -25.425188, byte-identical to v10. Deterministic (two forced-fit
+// runs byte-identical). No config gains on both metrics — the best
+// concrete change is no change; v11 exists only as the sharp lottery
+// bet toward p_place 0.28 (log -12.73), which needs mean modal share
+// ~0.65+ and the right modal game at each place in the final window.
+//
+// The v10 base (kept intact below): product-of-experts blend of the v8
+// refined fitted place-occupancy table with the Monte Carlo's
+// full per-place distribution, with the v8 Monte Carlo fallback on
 // full per-place distribution, with the v8 Monte Carlo fallback on
 // sparse history. Rank 1 is robekk "Fitted place-occupancy table" at
 // -13.2 (p 0.2674); rank 2 is achmadb271 "SINDRI Roblox Momentum
@@ -53,7 +76,7 @@ const FIT_WINDOW_H = Number(process.env.FIT_WINDOW_H ?? 72);
 /** Fitted table: recency half-life (hours) for the occupancy weights.
  * 12 h (v8; v7 used 24 h): shorter halflife favours recency, which the
  * held-out harness prefers at every horizon. */
-const FIT_HALFLIFE_H = Number(process.env.FIT_HALFLIFE_H ?? 12);
+const FIT_HALFLIFE_H = Number(process.env.FIT_HALFLIFE_H ?? 6);
 /** Fitted table: Dirichlet shrinkage strength toward the persistence
  * prior (see fittedTable). 20 (v8): on sparse history the prior
  * dominates (good, counts are noise there); on dense history the
@@ -74,8 +97,8 @@ const FIT_TEMP = Number(process.env.FIT_TEMP ?? 0.85);
  * the last place, linearly interpolated. Top places are more concentrated
  * (modal share 0.3-0.7) so they may want less flattening than the
  * diffuse bottom places. NaN (default) = use FIT_TEMP. */
-const FIT_TEMP_HI = Number(process.env.FIT_TEMP_HI ?? NaN);
-const FIT_TEMP_LO = Number(process.env.FIT_TEMP_LO ?? NaN);
+const FIT_TEMP_HI = Number(process.env.FIT_TEMP_HI ?? 1.5);
+const FIT_TEMP_LO = Number(process.env.FIT_TEMP_LO ?? 0.85);
 /** Fitted table: its own unnamed share (the Monte Carlo keeps
  * UNNAMED_HI/LO). The fitted table leaves more unnamed mass at the
  * bottom places (0.25/0.15), where turnover/newcomers are more common;
@@ -101,7 +124,7 @@ const DYN_SIGMA = Number(process.env.DYN_SIGMA ?? 0.5);
  * renormalised per place. v9's kernel tilt uses only the MC's
  * conditional mean rank (one number per game); the PoE uses the MC's
  * whole place distribution (its shape, not just its mean). */
-const POE_W = Number(process.env.POE_W ?? 0.25);
+const POE_W = Number(process.env.POE_W ?? 0.5);
 /** Hybrid horizon (v9): hours ahead for the drift-predicted rank
  * (only used when DYN_SOURCE is "drift"). */
 const DYN_HORIZON_H = Number(process.env.DYN_HORIZON_H ?? 72);
