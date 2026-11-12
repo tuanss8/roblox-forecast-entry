@@ -31,7 +31,7 @@ biggest climber in the practice window (Sweep The Moon, #29 at close
 with playing 3.7k -> 45k in ~2 days, #1-3 in most practice reads)
 essentially zero probability at places 1-5. The drift is capped at
 0.10/hour, high enough to let a fast climber (e.g. from #90 to #1 in
-two days) be predicted. The v5 change is breakout detection: when a
+two days) be predicted. The v6 change is breakout detection: when a
 game's 8-hour growth slope spikes above its own 84-hour baseline
 slope, its growth is accelerating, and an extra uncapped negative
 drift (0.2 times the acceleration) is added after the cap, so a

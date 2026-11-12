@@ -1,44 +1,35 @@
-// roblox-up-and-coming-forecast-01 entry v5: Monte Carlo log-rank forecaster
-// with split-window drift + breakout detection + sharper calibration.
+// roblox-up-and-coming-forecast-01 entry v6: horizon-ensemble Monte Carlo.
 //
-// v5 changes vs v4 (practice -27.35, p 0.0649; v4 official grading
-// underway at submit time; v3 official rank 28, -31.8, p 0.0418):
-// - BREAKOUT detection (NEW): a game's 8 h growth slope minus its 84 h
-//   baseline slope, when positive (growth accelerating), adds extra
-//   negative drift AFTER the ordinary drift cap (uncapped), so a genuine
-//   viral climber is not held back. BREAKOUT_BETA 0.2 was the sweet spot:
-//   0.1 -26.82, 0.2 -26.70, 0.3 -27.03, 0.5 -28.30, 1.0 -33.04 (the big
-//   values fire on noisy 2-point slopes and scramble the top 10).
-//   It fixes v4's blind spot: Sweep The Moon (rank 29 at close, playing
-//   6.3k -> 45k in the last hours) was the true #1 in 2 practice reads
-//   but v4 gave it only p 0.0126 at place 1.
-// - DRIFT_SCALE 0.6 -> 1.2 and VOL 0.12 -> 0.08: the rank momentum is
-//   real and the distribution was too wide. Joint sweep: DS 0.7 -27.18,
-//   0.8 -27.08, 0.9 -27.17, 1.0 -27.32 (at VOL 0.12); with breakout,
-//   DS 0.85 -26.62, 0.9 -26.57, 1.0 -26.21, 1.1 -26.11, 1.2 -25.98,
-//   1.3 -26.05, 1.4 -26.27 (VOL 0.08-0.09). VOL: 0.11 -26.46, 0.10
-//   -26.31, 0.09 -26.28, 0.08 -25.98, 0.07 -26.05. Peak is DS 1.2 /
-//   VOL 0.08; both directions turn worse past it.
-// - TEMP 1.3 -> 1.35 (small gain with the sharper distribution).
-// - BREAKOUT_BASE_HOURS 84 (vs 48: -26.62 vs -26.70; 24: -27.09).
+// v5 scored -25.98 practice (p 0.0744), official -26.0, rank 2 (rank 1 is
+// SINDRI -13.7, p 0.2541 — a different model family, not reachable by
+// Monte Carlo tuning). v6 targets p_place 0.08 (-25.26).
 //
-// Practice score: -25.98 (typical p 0.0744, hits 7.80, agreement 67.3),
-// confirmed at PATHS=12000 across seeds 20261112/1/2 (-25.968/-25.984/
-// -25.980, spread 0.016), deterministic byte-identical per seed.
-// +1.37 over v4 (-27.35), +0.62 over the official rank 1 (-26.6, p
-// 0.0697), and past the user's p_place 0.07 target (-26.59). Still
-// 0.72 short of p_place 0.08 (-25.26); the DS/VOL/breakout knobs have
-// peaked, so 0.08 needs a new idea (v6), not more tuning of these.
-// Negatives (measured, NOT used): CAP_HI 0.15-0.30 -27.96; GROWTH_BETA
-// -0.45/-0.5 worse; GROWTH_HOURS 12 -28.60; TENURE_BETA 0.01 -27.80,
-// 0.02 -28.59 (tenure is dead in this family too); SHRINK_K 1/3 no
-// gain at the optimum; UNNAMED_HI 0.30 -26.62; TEMP 1.4 -26.51.
-// Carried over from v4: off-chart surging games IMPOSSIBLE (late
-// newcomers appear nowhere in history); weekend effect NO SIGNAL;
-// growth-rate ranking prototype -43.25; Do Not Stop. and Bloody Ragdoll
-// Physics never appear in the 34-snapshot history, so no model can name
-// them in practice (the final hourly history will contain them if they
-// joined by the deadline).
+// v6 changes vs v5 (practice -25.98, p 0.0744):
+// - HORIZONS 84 -> 60,72,84: ensemble over drift windows. The biggest win
+//   (+0.48). Windows of 60-72 h capture medium-term momentum that the
+//   84 h window smooths away. Short windows hurt (24 h: -27.62); long
+//   windows dilute (168 h: -26.74). The optimum is FLAT (56,72,84 also
+//   -25.48; 64,84 -25.49), not a sharp peak, so it should transfer to
+//   the final window (a different dataset).
+// - VOL 0.08 -> 0.06: with the horizon ensemble the distribution is
+//   slightly too wide; 0.06 sharpens it (0.05 -25.49, 0.06 -25.42,
+//   0.08 -25.48, 0.10 -25.77). Verified in practice: -25.425, p 0.0787,
+//   hits 7.80, agreement 67.3 (v5: -25.98, p 0.0744).
+// - PERSIST_W 0.07 (a 7% blend of a no-momentum model, DRIFT_SCALE 0,
+//   HORIZONS 84, VOL 0.06) was measured at +0.08 but is NOT included:
+//   the HORIZONS ensemble alone reproduces -25.425 in practice, within
+//   0.002 of the full v6 with the blend (-25.423). Keeping v6 a pure
+//   two-default change from v5 avoids an extra code path.
+// Everything else stays at the v5 optimum: DRIFT_SCALE 1.2, TEMP 1.35,
+// BREAKOUT_BETA 0.2, UNNAMED_HI 0.25.
+//
+// Practice score: -25.425 (p 0.0787, hits 7.80, agreement 67.3),
+// +0.55 over v5, 0.16 short of the p_place 0.08 target (-25.26).
+// The Monte Carlo family has a calibration ceiling near p_place 0.08:
+// sharpening further (TEMP, lower VOL, per-place TEMP) hurts once the
+// model is confident but wrong about incumbent vs climber. Closing the
+// gap to SINDRI needs a fundamentally different model (e.g. an analytic
+// rank-diffusion propagator), not more tuning in this family.
 //
 // Deterministic: a seeded PRNG (mulberry32) drives every simulation, so
 // two runs on the same history write byte-identical forecasts. No network,
@@ -57,7 +48,7 @@ const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 /** Monte Carlo paths per horizon. */
 const PATHS = Number(process.env.PATHS ?? 12000);
 /** Per-hour volatility of log(rank). */
-const VOL_PER_HOUR = Number(process.env.VOL ?? 0.08);
+const VOL_PER_HOUR = Number(process.env.VOL ?? 0.06);
 /** Share of every place left unnamed, for games that join the chart during the window. */
 const UNNAMED_SHARE = Number(process.env.UNNAMED ?? 0.2);
 /** Optional per-place unnamed share: UNNAMED_HI at place 1, UNNAMED_LO at
@@ -75,7 +66,7 @@ const DRIFT_HOURS = Number(process.env.DRIFT_HOURS ?? 84);
 /** Extra drift windows to average over (comma-separated hours); the
  * default is just the DRIFT_HOURS window. Each horizon gets its own
  * Monte Carlo run and the place probabilities are averaged. */
-const HORIZONS = (process.env.HORIZONS ?? '84')
+const HORIZONS = (process.env.HORIZONS ?? '60,72,84')
   .split(',')
   .map((s) => Number(s.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);
