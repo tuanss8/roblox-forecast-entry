@@ -1,7 +1,7 @@
 {
   "name": "roblox-forecast-entry",
-  "version": "2.0.0",
-  "description": "Roblox Up-and-Coming forecaster v2: growth momentum + MAX_DRIFT 0.10 + Student-t(3)",
+  "version": "3.0.0",
+  "description": "Roblox Up-and-Coming forecaster v3: long-horizon momentum + horizon mixture + calibrated probabilities (practice -32.20)",
   "type": "module",
   "main": "main.ts",
   "license": "MIT"
