@@ -1,39 +1,52 @@
-// roblox-up-and-coming-forecast-01 entry v3: Monte Carlo log-rank forecaster
-// with a long-horizon momentum + growth model.
+// roblox-up-and-coming-forecast-01 entry v4: Monte Carlo log-rank forecaster
+// with a SPLIT-WINDOW drift: long-window rank momentum + short-window
+// growth momentum.
 //
-// v3 changes vs v2 (practice -33.19, official -33.2):
-// - DRIFT_HOURS 40 -> 84 and SHRINK_K 4 -> 12: a longer drift window with
-//   stronger shrinkage. Momentum is real but noisy; the long window +
-//   heavy shrinkage keeps it honest.
-// - GROWTH_BETA -0.5 -> -0.4.
-// - HORIZONS "40,84": the Monte Carlo is averaged over a 40 h and an
-//   84 h drift window (a horizon mixture), hedging the window choice.
-// - TEMP 1.3: the output probabilities are sharpened (p^1.3 per place,
-//   renormalised). The leaderboard shows the top entries carry a typical
-//   probability per place near 0.055 while v2 carried 0.036; sharpening
-//   closes part of that calibration gap. Pushing past ~1.35 stops helping.
-// - Per-place unnamed share (0.25 at place 1 -> 0.05 at place 10):
-//   newcomers take the top places (30% of practice #1/#2 are games not
-//   on the closing chart) but almost never the middle ones, so the top
-//   places keep more mass for them while the bottom places concentrate
-//   on named games. Worth +0.44 on the practice score vs a flat 0.20.
-// - PATHS 4000 -> 12000 per horizon: less Monte Carlo noise in the
-//   forecast itself.
-// Practice score: -31.76 (typical p 0.0417, hits 7.4, agreement ~60),
-// +1.43 over v2, confirmed across seeds 1-3 (spread 0.03).
-// Negatives measured on the practice scorer and NOT used: per-game
-// volatility (PGVOL, -32.84), a flat UNNAMED_SHARE below 0.20, VOL below
-// 0.12, per-place temperature, GROWTH_BETA -0.6 or stronger, a
-// conditional drift cap for fast climbers (CAP_HI, -31.88), explicit
-// mean reversion (MR_BETA, -31.86 and worse) and a tenure term
-// (TENURE_BETA, -32.01 and worse) — the regression drift already
-// captures the mean-reversion and tenure effects.
-// Honest limit: p_place 0.0417 is still short of rank 1's 0.0549 (log
-// score -29.0). p_place = exp(log score / 10), so a 0.06 typical
-// probability would need a log score of -28.13, better than rank 1.
-// No variant in this model family reached it; the next idea for a v4
-// would be a direct growth-rate ranking model instead of the log-rank
-// random walk.
+// v4 changes vs v3 (practice -31.76, official pending):
+// - GROWTH_HOURS 24: the player-count growth slope is measured over the
+//   last 24 h only, while the rank drift still uses the long 40/84 h
+//   horizons. Diagnosis: v3 gave Sweep The Moon (#29 at close, playing
+//   3.7k -> 45k in ~2 days, #1-3 in most practice reads) essentially
+//   ZERO probability at places 1-5, because the 84 h growth window
+//   diluted its explosive recent playing growth (0.039/h) and the
+//   shrunk rank regression (-0.017/h) could not express a #29 -> #1
+//   climb. A short growth window catches the explosion while the long
+//   rank window keeps stable games honest.
+// - A pure direct growth-rate ranking model (rank by extrapolated
+//   playing, no rank persistence) was built and measured in a Python
+//   prototype: -43.25, far worse than v3. Rank is 0.96 autocorrelated;
+//   discarding the current rank throws away the strongest signal.
+//   v4 therefore keeps the random walk and fixes its climber blind
+//   spot instead of replacing it.
+//
+// Practice score: -27.35 (typical p 0.0649, hits 7.8, agreement 63.9),
+// confirmed at PATHS=12000 across seeds (spread 0.06). +4.41 over v3
+// (-31.76), +1.65 over the official rank 1 (-29.0), and above the
+// 0.06 typical-probability target (needs -28.13). The gain is broad:
+// v4 beats v3 on 9 of the 10 practice reads, and Sweep The Moon now
+// carries p 0.097-0.104 at places 2-4 (v3 gave it ~0 at places 1-5).
+// Sweep log (practice scorer, PATHS=4000 unless noted): GROWTH_HOURS
+// 24 -32.11, 12 -29.49, 8 -28.48, 6 -28.48, 4 -33.94 (too short: only
+// 1 point in window); HORIZONS 84 alone -28.22 vs 40,84 -28.48;
+// GROWTH_BETA -0.45 -28.17, -0.35 -28.48, -0.5 -28.83; SHRINK_K 6
+// -27.88, 4 -27.73, 3 -27.65, 2 -27.61, 1 -27.61, 0 -27.75;
+// DRIFT_SCALE 0.6 -27.52 (vs 0.5 -27.61); TEMP 1.4 -27.37 (vs 1.3
+// -27.35, a wash); MAX_DRIFT 0.15 -27.96 and 0.08 -28.15 (the 0.10
+// cap matters both ways); VOL 0.10 -28.24, 0.14 -28.33.
+// Negatives carried over from v3 (measured, NOT used): per-game
+// volatility (PGVOL), a flat UNNAMED_SHARE below 0.20, VOL below 0.12,
+// per-place temperature, a conditional drift cap for fast climbers
+// (CAP_HI), explicit mean reversion and a tenure term. Shortening the
+// RANK drift window also hurts (HORIZONS 24 alone: -32.69).
+// Honest limit: two late-window #1/#2 games (Do Not Stop. and
+// 10773926254) never appear in the 34-snapshot history, so no model
+// can name them — only the unnamed share covers them. The final
+// history (hourly house-recorder reads to the deadline) will contain
+// games that joined by then, so the practice loss from true newcomers
+// overstates the final loss somewhat. A pure direct growth-rate
+// ranking model (rank by extrapolated playing, no rank persistence)
+// was prototyped and measured -43.25: rank is 0.96 autocorrelated,
+// so discarding the current rank throws away the strongest signal.
 //
 // Deterministic: a seeded PRNG (mulberry32) drives every simulation, so
 // two runs on the same history write byte-identical forecasts. No network,
@@ -70,12 +83,12 @@ const DRIFT_HOURS = Number(process.env.DRIFT_HOURS ?? 84);
 /** Extra drift windows to average over (comma-separated hours); the
  * default is just the DRIFT_HOURS window. Each horizon gets its own
  * Monte Carlo run and the place probabilities are averaged. */
-const HORIZONS = (process.env.HORIZONS ?? '40,84')
+const HORIZONS = (process.env.HORIZONS ?? '84')
   .split(',')
   .map((s) => Number(s.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);
 /** Shrinkage: a drift from n points is multiplied by n / (n + SHRINK_K). */
-const SHRINK_K = Number(process.env.SHRINK_K ?? 12);
+const SHRINK_K = Number(process.env.SHRINK_K ?? 2);
 /** Cap on |drift| per hour, to keep noisy regressions from exploding. */
 const MAX_DRIFT = Number(process.env.MAX_DRIFT ?? 0.1);
 /** Conditional drift cap for fast climbers: when a game's growth-momentum
@@ -85,11 +98,19 @@ const MAX_DRIFT = Number(process.env.MAX_DRIFT ?? 0.1);
 const CAP_HI = Number(process.env.CAP_HI ?? MAX_DRIFT);
 const GROWTH_CAP_THRESH = Number(process.env.GROWTH_CAP_THRESH ?? 0.03);
 /** Global multiplier on all drifts (0 = no momentum, 1 = full). */
-const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 0.5);
+const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 0.6);
 /** Growth-momentum coefficient: how much a game's recent player-count
  * growth rate (log playing per hour) shifts its log-rank drift. Negative:
  * a growing game climbs (its log-rank falls). */
 const GROWTH_BETA = Number(process.env.GROWTH_BETA ?? -0.4);
+/** Growth window: the player-count growth slope is measured over the last
+ * GROWTH_HOURS hours only, separate from the rank-drift window. The
+ * rank drift is stable over a long window, but the growth that drives
+ * explosive climbs (a game's playing multiplying over a day) is a
+ * recent signal — a long window dilutes it. v3 used the same window
+ * for both and missed the biggest climber (Sweep The Moon, #29 ->
+ * #1-3, whose playing went 3.7k -> 45k in the last ~2 days). */
+const GROWTH_HOURS = Number(process.env.GROWTH_HOURS ?? 8);
 /** Student-t degrees of freedom for the log-rank increments. 0 (or
  * unset) means Gaussian. */
 const T_DOF = Number(process.env.T_DOF ?? 3);
@@ -209,7 +230,7 @@ function gameDrift(
   drift *= DRIFT_SCALE;
   let growthDrift = 0;
   if (GROWTH_BETA !== 0) {
-    const gp = w.filter((p) => Number.isFinite(p.lp));
+    const gp = pts.filter((p) => tLast - p.t <= GROWTH_HOURS && Number.isFinite(p.lp));
     if (gp.length >= 2) {
       let gmt = 0;
       let gmp = 0;

@@ -1,8 +1,1 @@
-{
-  "name": "roblox-forecast-entry",
-  "version": "3.0.0",
-  "description": "Roblox Up-and-Coming forecaster v3: long-horizon momentum + horizon mixture + calibrated probabilities + per-place unnamed share (practice -31.76)",
-  "type": "module",
-  "main": "main.ts",
-  "license": "MIT"
-}
+{"private":true,"type":"module"}
