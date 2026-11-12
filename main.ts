@@ -1,43 +1,90 @@
-// roblox-up-and-coming-forecast-01 entry v6: horizon-ensemble Monte Carlo.
+// roblox-up-and-coming-forecast-01 entry v8: fitted place-occupancy table
+// (refined) with a Monte Carlo fallback. Rank 1 is robekk "Fitted
+// place-occupancy table" at -13.2 (p 0.2674), practically AT the practice
+// oracle (-13.28, p 0.265); rank 2 is achmadb271 -13.7. Our v5 official
+// is rank 4 at -26.0 (p 0.0745). The best Monte Carlo on practice
+// (side-chat v6: HORIZONS 60,72,84, VOL 0.06, TEMP 1.35) scores -25.425
+// (p 0.0787) and is the fallback here. v8 refines v7's fitted table
+// (see FIT_SHRINK_K / FIT_PRIOR_SCALE / FIT_TEMP below). The refinements
+// were measured on a rolling held-out harness over the practice history
+// (fit on snapshots before a cut, score one forecast on the next 10
+// reads): v7's raw table scores -54.7 there, v8's refined table -42.7
+// (+12.0). The fitted table is used ONLY when the history is dense
+// enough to support it (see DENSE_MIN_SNAPS / DENSE_MAX_GAP_H below);
+// on sparse history (like the 34-snapshot practice history) it falls
+// back to the Monte Carlo, which is verified at -25.425 on practice.
 //
-// v5 scored -25.98 practice (p 0.0744), official -26.0, rank 2 (rank 1 is
-// SINDRI -13.7, p 0.2541 — a different model family, not reachable by
-// Monte Carlo tuning). v6 targets p_place 0.08 (-25.26).
+// WHY the refinements: a raw empirical occupancy table is a noisy
+// estimate (each place has only ~10-70 weighted observations), and a
+// noisy table is punished far more than a diffuse one (a confident
+// wrong p costs ln(0.001)). v8 therefore (1) shrinks the empirical
+// frequencies toward a persistence prior (Dirichlet: counts +
+// FIT_SHRINK_K * prior, prior = exp(-|rank - place| /
+// FIT_PRIOR_SCALE) over the games in the last snapshot, i.e. "games
+// stay near their current rank", corr 0.94), which cuts variance while
+// letting the counts dominate when the history is dense (the Dirichlet
+// form adapts: prior share = k / (tot + k), small on dense data);
+// (2) flattens the fitted probabilities slightly (FIT_TEMP 0.85) to
+// hedge overconfidence; (3) leaves more unnamed mass at the bottom
+// places (UNNAMED_LO 0.15), where turnover/newcomers are more common.
+// The pure-prior limit is worse than the blend, confirming the counts
+// still carry signal. robekk's -13.2 shows the dense-data table works;
+// v8's table is the same idea with a better estimator, aiming to match
+// robekk and, if the official oracle is a touch above the practice
+// oracle, to reach the user target of log -13 (p 0.2725).
 //
-// v6 changes vs v5 (practice -25.98, p 0.0744):
-// - HORIZONS 84 -> 60,72,84: ensemble over drift windows. The biggest win
-//   (+0.48). Windows of 60-72 h capture medium-term momentum that the
-//   84 h window smooths away. Short windows hurt (24 h: -27.62); long
-//   windows dilute (168 h: -26.74). The optimum is FLAT (56,72,84 also
-//   -25.48; 64,84 -25.49), not a sharp peak, so it should transfer to
-//   the final window (a different dataset).
-// - VOL 0.08 -> 0.06: with the horizon ensemble the distribution is
-//   slightly too wide; 0.06 sharpens it (0.05 -25.49, 0.06 -25.42,
-//   0.08 -25.48, 0.10 -25.77). Verified in practice: -25.425, p 0.0787,
-//   hits 7.80, agreement 67.3 (v5: -25.98, p 0.0744).
-// - PERSIST_W 0.07 (a 7% blend of a no-momentum model, DRIFT_SCALE 0,
-//   HORIZONS 84, VOL 0.06) was measured at +0.08 but is NOT included:
-//   the HORIZONS ensemble alone reproduces -25.425 in practice, within
-//   0.002 of the full v6 with the blend (-25.423). Keeping v6 a pure
-//   two-default change from v5 avoids an extra code path.
-// Everything else stays at the v5 optimum: DRIFT_SCALE 1.2, TEMP 1.35,
-// BREAKOUT_BETA 0.2, UNNAMED_HI 0.25.
+// User target: log -13 (p_place 0.2725), 0.2 better than robekk (-13.2)
+// and 0.28 above the practice oracle (-13.28). On practice data -13 is
+// NOT reachable (above the oracle); the fitted branch's only hope is
+// that the dense final history lets it recover the true conditional
+// distribution the way robekk's did, and that the refined estimator is
+// a touch closer to the truth than robekk's. See the status file for
+// the honest assessment.
 //
-// Practice score: -25.425 (p 0.0787, hits 7.80, agreement 67.3),
-// +0.55 over v5, 0.16 short of the p_place 0.08 target (-25.26).
-// The Monte Carlo family has a calibration ceiling near p_place 0.08:
-// sharpening further (TEMP, lower VOL, per-place TEMP) hurts once the
-// model is confident but wrong about incumbent vs climber. Closing the
-// gap to SINDRI needs a fundamentally different model (e.g. an analytic
-// rank-diffusion propagator), not more tuning in this family.
-//
-// Deterministic: a seeded PRNG (mulberry32) drives every simulation, so
-// two runs on the same history write byte-identical forecasts. No network,
+// Deterministic: a seeded PRNG (mulberry32) drives the Monte Carlo, so
+// two runs on the same history write byte-identical forecasts. The
+// fitted table is a deterministic function of the history. No network,
 // no model calls; only the history in /input is read.
 //
 // Outside the grader's container, MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR
 // stand in for /input and /output:
 //   mkdir -p out && MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out node main.ts
+
+/** Use the fitted occupancy table only when the history holds at least
+ * this many snapshots (dense, hourly-style history). */
+const DENSE_MIN_SNAPS = Number(process.env.DENSE_MIN_SNAPS ?? 48);
+/** ...and the median gap between consecutive snapshots is at most this
+ * many hours. Practice history: 34 snaps, median gap ~6 h -> Monte Carlo. */
+const DENSE_MAX_GAP_H = Number(process.env.DENSE_MAX_GAP_H ?? 2);
+/** Fitted table: occupancy window (hours back from the cut). */
+const FIT_WINDOW_H = Number(process.env.FIT_WINDOW_H ?? 72);
+/** Fitted table: recency half-life (hours) for the occupancy weights.
+ * 12 h (v8; v7 used 24 h): shorter halflife favours recency, which the
+ * held-out harness prefers at every horizon. */
+const FIT_HALFLIFE_H = Number(process.env.FIT_HALFLIFE_H ?? 12);
+/** Fitted table: Dirichlet shrinkage strength toward the persistence
+ * prior (see fittedTable). 20 (v8): on sparse history the prior
+ * dominates (good, counts are noise there); on dense history the
+ * counts dominate more (prior share = k / (tot + k)). Held-out
+ * optimum is ~30, but 20 keeps the counts more influential on dense
+ * data for a ~0.1 held-out cost. */
+const FIT_SHRINK_K = Number(process.env.FIT_SHRINK_K ?? 20);
+/** Fitted table: persistence-prior scale (ranks). Prior weight for a
+ * game is exp(-|rank - place| / scale); 4.0 (v8) spreads the prior
+ * over nearby ranks (games shuffle within the top 10). */
+const FIT_PRIOR_SCALE = Number(process.env.FIT_PRIOR_SCALE ?? 4);
+/** Fitted table: temperature on the fitted probabilities per place
+ * (<1 flattens). 0.85 (v8): mild hedge against overconfident fitted
+ * frequencies. */
+const FIT_TEMP = Number(process.env.FIT_TEMP ?? 0.85);
+/** Fitted table: its own unnamed share (the Monte Carlo keeps
+ * UNNAMED_HI/LO). The fitted table leaves more unnamed mass at the
+ * bottom places (0.25/0.15), where turnover/newcomers are more common;
+ * the held-out harness prefers it. */
+const FIT_UNNAMED_HI = Number(process.env.FIT_UNNAMED_HI ?? 0.25);
+const FIT_UNNAMED_LO = Number(process.env.FIT_UNNAMED_LO ?? 0.15);
+/** Force the fitted table even on sparse history (testing only). */
+const FORCE_FIT = Number(process.env.FORCE_FIT ?? 0);
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -288,6 +335,129 @@ function gameDrift(
   return drift;
 }
 
+/** Fitted place-occupancy table (v8, refined): P(game occupies place
+ * k) estimated straight from the history, shrunk toward a persistence
+ * prior. For each place k, the recency-weighted frequency of each game
+ * at that place over the last FIT_WINDOW_H hours (weight
+ * 0.5^((tLast - t) / FIT_HALFLIFE_H)) is combined Dirichlet-style with
+ * a prior: posterior = (counts + FIT_SHRINK_K * prior) / (tot +
+ * FIT_SHRINK_K), where the prior spreads mass over the games in the
+ * last snapshot as exp(-|rank - k| / FIT_PRIOR_SCALE) ("games stay near
+ * their current rank", corr 0.94). The prior cuts the variance of the
+ * noisy frequencies (the main failure mode on sparse data) while the
+ * counts still dominate when the history is dense. The fitted
+ * probabilities are then flattened slightly (FIT_TEMP) to hedge
+ * overconfidence, scaled to leave the per-place unnamed share, and
+ * top10 is the modal game per place. This is the approach the current
+ * rank 1 ("Fitted place-occupancy table", -13.2) uses, with a better
+ * estimator: it estimates the conditional distribution directly
+ * instead of deriving it by simulating log-rank paths. It needs a dense
+ * history to work -- with only a handful of recent snapshots the
+ * frequencies are noise (measured on practice: raw table -46 to -53;
+ * refined table still below the Monte Carlo on sparse data, see the
+ * status file). */
+function fittedTable(snaps: Snapshot[], places: number): {
+  probabilities: Array<{ universe_id: number; place: number; p: number }>;
+  top10: number[];
+} {
+  const tLast = Date.parse(snaps[snaps.length - 1]!.at);
+  const cnt: Array<Map<number, number>> = [];
+  const tot: number[] = [];
+  for (let k = 0; k < places; k++) {
+    cnt.push(new Map());
+    tot.push(0);
+  }
+  for (const s of snaps) {
+    const ageH = (tLast - Date.parse(s.at)) / 3600000;
+    if (ageH > FIT_WINDOW_H) continue;
+    const w = Math.pow(0.5, ageH / FIT_HALFLIFE_H);
+    for (const g of s.up_and_coming) {
+      if (g.rank < 1 || g.rank > places) continue;
+      const m = cnt[g.rank - 1]!;
+      m.set(g.universe_id, (m.get(g.universe_id) ?? 0) + w);
+      tot[g.rank - 1]! += w;
+    }
+  }
+  // Persistence prior from the last snapshot's ranks.
+  const lastRank = new Map<number, number>();
+  for (const g of snaps[snaps.length - 1]!.up_and_coming) {
+    lastRank.set(g.universe_id, g.rank);
+  }
+  const probabilities: Array<{ universe_id: number; place: number; p: number }> = [];
+  // Per-place sorted posteriors, kept for the distinct top10 below.
+  const perPlace: Array<Array<[number, number]>> = [];
+  for (let place = 0; place < places; place++) {
+    const un = FIT_UNNAMED_HI + ((FIT_UNNAMED_LO - FIT_UNNAMED_HI) * place) / (places - 1);
+    // Prior: exp(-|rank - place| / scale), normalised over last snapshot.
+    const prior = new Map<number, number>();
+    let priorSum = 0;
+    for (const [uid, r] of lastRank) {
+      const w = Math.exp(-Math.abs(r - (place + 1)) / FIT_PRIOR_SCALE);
+      prior.set(uid, w);
+      priorSum += w;
+    }
+    // Posterior (Dirichlet shrinkage) then temperature.
+    const denom = tot[place]! + FIT_SHRINK_K;
+    const post = new Map<number, number>();
+    for (const [uid, c] of cnt[place]!) {
+      post.set(uid, (c + FIT_SHRINK_K * (prior.get(uid) ?? 0) / priorSum) / denom);
+    }
+    if (FIT_SHRINK_K > 0) {
+      for (const [uid, w] of prior) {
+        if (!post.has(uid)) post.set(uid, (FIT_SHRINK_K * w / priorSum) / denom);
+      }
+    }
+    let entries = [...post.entries()];
+    if (FIT_TEMP !== 1) {
+      const totP = entries.reduce((a, [, v]) => a + v, 0);
+      const totT = entries.reduce((a, [, v]) => a + Math.pow(v, FIT_TEMP), 0);
+      if (totT > 0 && totP > 0) {
+        entries = entries.map(([uid, v]) => [uid, (Math.pow(v, FIT_TEMP) / totT) * totP] as [number, number]);
+      }
+    }
+    entries.sort((a, b) => b[1] - a[1]);
+    perPlace.push(entries);
+    for (const [uid, p0] of entries) {
+      const p = p0 * (1 - un);
+      if (p >= MIN_P) {
+        probabilities.push({ universe_id: uid, place: place + 1, p: Math.round(p * 1e6) / 1e6 });
+      }
+    }
+  }
+  // top10 must be 10 DISTINCT games: the same game can be the modal
+  // game at two places (v7 had this bug -- a duplicate top10 wastes a
+  // slot and may fail server validation). Greedy by place: at each
+  // place take the highest-posterior game not already used; fall back
+  // to the best unused game anywhere if a place is exhausted.
+  const top10: number[] = [];
+  const used = new Set<number>();
+  for (let place = 0; place < places; place++) {
+    let pick = 0;
+    for (const [uid] of perPlace[place]!) {
+      if (!used.has(uid)) {
+        pick = uid;
+        break;
+      }
+    }
+    if (pick === 0) {
+      outer: for (let p2 = 0; p2 < places; p2++) {
+        for (const [uid] of perPlace[p2]!) {
+          if (!used.has(uid)) {
+            pick = uid;
+            break outer;
+          }
+        }
+      }
+    }
+    if (pick !== 0) {
+      used.add(pick);
+      top10.push(pick);
+    }
+  }
+  probabilities.sort((a, b) => a.place - b.place || b.p - a.p || a.universe_id - b.universe_id);
+  return { probabilities, top10 };
+}
+
 function main(): void {
   const task = JSON.parse(readFileSync(join(INPUT_DIR, 'task.json'), 'utf8')) as {
     places: number;
@@ -301,6 +471,21 @@ function main(): void {
     .filter((l) => l !== '');
   const snaps = lines.map((l) => JSON.parse(l) as Snapshot);
   const t0 = Date.parse(snaps[0]!.at);
+
+  // Density gate: use the fitted occupancy table only on a dense history.
+  // Median gap between consecutive snapshots decides.
+  {
+    const times = snaps.map((s) => Date.parse(s.at)).sort((a, b) => a - b);
+    const gaps: number[] = [];
+    for (let i = 1; i < times.length; i++) gaps.push((times[i]! - times[i - 1]!) / 3600000);
+    gaps.sort((a, b) => a - b);
+    const medGap = gaps.length > 0 ? gaps[Math.floor(gaps.length / 2)]! : Infinity;
+    if (FORCE_FIT || (snaps.length >= DENSE_MIN_SNAPS && medGap <= DENSE_MAX_GAP_H)) {
+      const { probabilities, top10 } = fittedTable(snaps, places);
+      writeFileSync(join(OUTPUT_DIR, task.output), `${JSON.stringify({ probabilities, top10 })}\n`);
+      return;
+    }
+  }
 
   // Per-game history: universe_id -> [{tHours, logRank, logPlaying}].
   const perGame = new Map<number, Array<{ t: number; lr: number; lp: number }>>();
