@@ -31,8 +31,10 @@ concentrated, well-calibrated probability. It simulates every game
 forward 72 hours, hour by hour (12,000 paths per window), re-ranks the
 games at each simulated hour, and reports the fraction of (path, hour)
 combinations in which each game holds each of the top 10 places. New
-games that will join the chart during the window cannot be named, so 20%
-of every place is left unnamed for them.
+games that will join the chart during the window cannot be named, so
+part of every place is left unnamed for them — 25% at place 1, falling
+to 5% at place 10, because newcomers take the top places (30% of the
+practice window's #1/#2) but almost never the middle ones.
 
 Deterministic: a seeded PRNG (mulberry32) drives every simulation, so two
 runs on the same history write byte-identical forecasts. No network, no
@@ -50,6 +52,6 @@ Node 22, standard library only.
 
 On the kit's practice instance (history to 2026-11-07, window to
 2026-11-10), scored against the 10 archive reads in the window, this
-forecast scores a log score of about **-32.2**, against the house
-baseline's -43.5, the house model's -37.2, and the v2 entry's -33.2
-(official dev score).
+forecast scores a log score of about **-31.76** (typical probability per
+place 0.042), against the house baseline's -43.5, the house model's
+-37.2, and the v2 entry's -33.2 (official dev score).

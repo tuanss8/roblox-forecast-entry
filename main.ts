@@ -12,13 +12,28 @@
 //   renormalised). The leaderboard shows the top entries carry a typical
 //   probability per place near 0.055 while v2 carried 0.036; sharpening
 //   closes part of that calibration gap. Pushing past ~1.35 stops helping.
+// - Per-place unnamed share (0.25 at place 1 -> 0.05 at place 10):
+//   newcomers take the top places (30% of practice #1/#2 are games not
+//   on the closing chart) but almost never the middle ones, so the top
+//   places keep more mass for them while the bottom places concentrate
+//   on named games. Worth +0.44 on the practice score vs a flat 0.20.
 // - PATHS 4000 -> 12000 per horizon: less Monte Carlo noise in the
 //   forecast itself.
-// Practice score: -32.20 (typical p 0.040, hits 7.4, agreement ~60),
-// +0.99 over v2, confirmed across seeds 1-3 (spread 0.04).
+// Practice score: -31.76 (typical p 0.0417, hits 7.4, agreement ~60),
+// +1.43 over v2, confirmed across seeds 1-3 (spread 0.03).
 // Negatives measured on the practice scorer and NOT used: per-game
-// volatility (PGVOL, -32.84), UNNAMED_SHARE below 0.20, VOL below 0.12,
-// per-place temperature, GROWTH_BETA -0.6 or stronger.
+// volatility (PGVOL, -32.84), a flat UNNAMED_SHARE below 0.20, VOL below
+// 0.12, per-place temperature, GROWTH_BETA -0.6 or stronger, a
+// conditional drift cap for fast climbers (CAP_HI, -31.88), explicit
+// mean reversion (MR_BETA, -31.86 and worse) and a tenure term
+// (TENURE_BETA, -32.01 and worse) — the regression drift already
+// captures the mean-reversion and tenure effects.
+// Honest limit: p_place 0.0417 is still short of rank 1's 0.0549 (log
+// score -29.0). p_place = exp(log score / 10), so a 0.06 typical
+// probability would need a log score of -28.13, better than rank 1.
+// No variant in this model family reached it; the next idea for a v4
+// would be a direct growth-rate ranking model instead of the log-rank
+// random walk.
 //
 // Deterministic: a seeded PRNG (mulberry32) drives every simulation, so
 // two runs on the same history write byte-identical forecasts. No network,
@@ -40,6 +55,12 @@ const PATHS = Number(process.env.PATHS ?? 12000);
 const VOL_PER_HOUR = Number(process.env.VOL ?? 0.12);
 /** Share of every place left unnamed, for games that join the chart during the window. */
 const UNNAMED_SHARE = Number(process.env.UNNAMED ?? 0.2);
+/** Optional per-place unnamed share: UNNAMED_HI at place 1, UNNAMED_LO at
+ * the last place, linearly interpolated. When both are set they override
+ * UNNAMED_SHARE. Newcomers take the top places more often than the
+ * middle ones, so the top may want more unnamed mass than the bottom. */
+const UNNAMED_HI = Number(process.env.UNNAMED_HI ?? 0.25);
+const UNNAMED_LO = Number(process.env.UNNAMED_LO ?? 0.05);
 /** Smallest probability written out (below this a game is left to the unnamed share). */
 const MIN_P = 0.001;
 /** A game's drift regression uses reads within the last DRIFT_HOURS hours
@@ -57,6 +78,12 @@ const HORIZONS = (process.env.HORIZONS ?? '40,84')
 const SHRINK_K = Number(process.env.SHRINK_K ?? 12);
 /** Cap on |drift| per hour, to keep noisy regressions from exploding. */
 const MAX_DRIFT = Number(process.env.MAX_DRIFT ?? 0.1);
+/** Conditional drift cap for fast climbers: when a game's growth-momentum
+ * term is more negative than -GROWTH_CAP_THRESH (it is climbing fast),
+ * the drift cap is CAP_HI instead of MAX_DRIFT, so a genuine viral
+ * climber is not held back by the same cap as a noisy regression. */
+const CAP_HI = Number(process.env.CAP_HI ?? MAX_DRIFT);
+const GROWTH_CAP_THRESH = Number(process.env.GROWTH_CAP_THRESH ?? 0.03);
 /** Global multiplier on all drifts (0 = no momentum, 1 = full). */
 const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 0.5);
 /** Growth-momentum coefficient: how much a game's recent player-count
@@ -77,6 +104,18 @@ const TEMP_LO = Number(process.env.TEMP_LO ?? NaN);
 /** Per-game volatility: 1 = scale each game's vol by its own recent
  * log-rank change std (clamped to [0.5, 2] of the global vol). */
 const PGVOL = Number(process.env.PGVOL ?? 0);
+/** Mean reversion: the chart's top games tend to fall back and its
+ * bottom games tend to climb (measured: rank 1-3 mean next dlogr
+ * +0.0205/h, rank 30-100 mean -0.0027/h). A drift of -MR_BETA *
+ * (logRank - meanLogRank) pulls every game toward the chart's mean
+ * log-rank. 0 disables it. */
+const MR_BETA = Number(process.env.MR_BETA ?? 0);
+/** Tenure effect: games new to the chart tend to climb and older games
+ * tend to fall (measured: tenure <24 h mean next dlogr -0.0065/h,
+ * tenure 72-168 h mean +0.0050/h). A drift of TENURE_BETA *
+ * (tenureHours - 72) / 72, with tenure measured from the game's first
+ * appearance in the history. 0 disables it. */
+const TENURE_BETA = Number(process.env.TENURE_BETA ?? 0);
 /** PRNG seed. */
 const SEED = Number(process.env.SEED ?? 20261112);
 
@@ -145,6 +184,8 @@ function gameDrift(
   pts: Array<{ t: number; lr: number; lp: number }>,
   tLast: number,
   windowH: number,
+  lr0: number,
+  meanLr: number,
 ): number {
   const w = pts.filter((p) => tLast - p.t <= windowH);
   if (w.length < 2) return 0;
@@ -166,6 +207,7 @@ function gameDrift(
   let drift = den > 0 ? num / den : 0;
   drift *= n / (n + SHRINK_K);
   drift *= DRIFT_SCALE;
+  let growthDrift = 0;
   if (GROWTH_BETA !== 0) {
     const gp = w.filter((p) => Number.isFinite(p.lp));
     if (gp.length >= 2) {
@@ -183,11 +225,22 @@ function gameDrift(
         gnum += (p.t - gmt) * (p.lp - gmp);
         gden += (p.t - gmt) * (p.t - gmt);
       }
-      if (gden > 0) drift += GROWTH_BETA * (gnum / gden);
+      if (gden > 0) growthDrift = GROWTH_BETA * (gnum / gden);
     }
   }
-  if (drift > MAX_DRIFT) drift = MAX_DRIFT;
-  if (drift < -MAX_DRIFT) drift = -MAX_DRIFT;
+  drift += growthDrift;
+  // Mean reversion toward the chart's mean log-rank.
+  if (MR_BETA !== 0) drift += -MR_BETA * (lr0 - meanLr);
+  // Tenure: new games climb, old games fall.
+  if (TENURE_BETA !== 0 && pts.length > 0) {
+    const tenureH = tLast - pts[0]!.t;
+    drift += (TENURE_BETA * (tenureH - 72)) / 72;
+  }
+  // Fast climbers get a higher cap: a game whose player count is surging
+  // can genuinely climb faster than the ordinary cap allows.
+  const cap = growthDrift < -GROWTH_CAP_THRESH ? CAP_HI : MAX_DRIFT;
+  if (drift > cap) drift = cap;
+  if (drift < -cap) drift = -cap;
   return drift;
 }
 
@@ -233,6 +286,7 @@ function main(): void {
   const n = games.length;
   const ids = games.map((g) => g.id);
   const lr0 = new Float64Array(games.map((g) => g.lr0));
+  const meanLr = lr0.reduce((a, b) => a + b, 0) / n;
 
   // Global per-hour volatility of log-rank changes (for the PGVOL scale).
   let globalVol = VOL_PER_HOUR;
@@ -260,7 +314,9 @@ function main(): void {
   const idx = new Array<number>(n);
   for (let i = 0; i < n; i++) idx[i] = i;
   HORIZONS.forEach((windowH, hi) => {
-    const drift = new Float64Array(games.map((g) => gameDrift(g.pts, tLast, windowH)));
+    const drift = new Float64Array(
+      games.map((g) => gameDrift(g.pts, tLast, windowH, g.lr0, meanLr)),
+    );
     // Per-game vol multipliers.
     const vol = new Float64Array(n).fill(VOL_PER_HOUR);
     if (PGVOL) {
@@ -299,13 +355,18 @@ function main(): void {
     }
   });
 
-  // Probabilities, scaled to leave UNNAMED_SHARE of every place unnamed.
-  // Optional temperature: p^TEMP per place, renormalised to the same total.
+  // Probabilities, scaled to leave the unnamed share of every place
+  // unnamed. Optional temperature: p^TEMP per place, renormalised to the
+  // same total.
   const raw: Array<Array<number>> = [];
   for (let i = 0; i < n; i++) {
     const row: number[] = [];
     for (let place = 0; place < places; place++) {
-      row.push((counts[i * places + place]! / totalSamples) * (1 - UNNAMED_SHARE));
+      const un =
+        Number.isFinite(UNNAMED_HI) && Number.isFinite(UNNAMED_LO)
+          ? UNNAMED_HI + ((UNNAMED_LO - UNNAMED_HI) * place) / (places - 1)
+          : UNNAMED_SHARE;
+      row.push((counts[i * places + place]! / totalSamples) * (1 - un));
     }
     raw.push(row);
   }
