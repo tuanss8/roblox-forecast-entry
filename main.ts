@@ -1,28 +1,35 @@
-// roblox-up-and-coming-forecast-01 entry v11: SHARP LOTTERY variant of
-// the v10 product-of-experts blend — same v8 refined fitted
-// place-occupancy table x Monte Carlo full per-place distribution, but
-// with a SHARP configuration aimed at p_place 0.28 (log -12.73):
-// FIT_TEMP_HI=1.5 / FIT_TEMP_LO=0.85 (per-place temperature: sharpen
-// the top place, flatten the bottom), FIT_HALFLIFE_H=6 (short recency
-// window), POE_W=0.5 (half MC). This is a DELIBERATE LOTTERY BET on
-// the final window (13-16 Nov) being ultra-stable: every sharp config
-// gains on the practice forced-fit and LOSES on the honest rolling
-// held-out harness, so v11 is expected to be WORSE than v10 unless the
-// final window is far more concentrated than practice. v10 stays the
-// submit; v11 is only a lottery ticket, NOT the submit.
+// roblox-up-and-coming-forecast-01 entry v12: FORCE-MONTE-CARLO variant
+// of v10. The fitted place-occupancy table / product-of-experts code is
+// intact below but NEVER runs: FORCE_MC (default 1) disables the density
+// gate, so the entry always takes the Monte Carlo fallback.
 //
-// MEASURED (practice, 2026-11-12): forced-fit -30.19 (p 0.0489, hits
-// 7.20, agr 62.4) = +1.38 vs v10's -31.57; harness -41.87 (p 0.0152,
-// hits 4.99, agr 35.8) = -1.40 vs v10's -40.47; default MC fallback
-// -25.425188, byte-identical to v10. Deterministic (two forced-fit
-// runs byte-identical). No config gains on both metrics — the best
-// concrete change is no change; v11 exists only as the sharp lottery
-// bet toward p_place 0.28 (log -12.73), which needs mean modal share
-// ~0.65+ and the right modal game at each place in the final window.
+// WHY force the MC (decided by Yazz 2026-11-12 22:45 WIB, after two
+// independent -13.1 researches found NO path to -13.1): the final
+// history will be dense (~90+ snaps, median gap ~1 h, RULES.txt), so
+// v10/v11's density gate (>= 48 snaps, median gap <= 2 h) WILL trigger
+// in the final and force the fitted branch — whose honest expectation is
+// the rolling harness (-40.47 v10 / -41.87 v11), far below the MC
+// fallback's known -25.425 (v5 SCORED -26.0 official on the MC). The
+// board leaders at -13.2 bake in the Nov 8-10 evaluation-window data
+// (their score IS the in-sample oracle, p 0.267688); in the final
+// re-grading their baked-in tables, scored on Nov 13-16 data, collapse
+// toward -40/-50. So the final is a race to be least-bad, and the MC's
+// ~-25.4 may be rank 1 after the collapse. v12 locks that in: the
+// fitted branch's stable-set upside is unproven (no honest test ever
+// showed a runtime-fit table near -13 on unseen data) and its honest
+// expectation is worse than the MC. FORCE_MC=0 restores v10 exactly
+// (fitted branch + gate), for testing only.
 //
-// The v10 base (kept intact below): product-of-experts blend of the v8
-// refined fitted place-occupancy table with the Monte Carlo's
-// full per-place distribution, with the v8 Monte Carlo fallback on
+// MEASURED (this build — filled in after the tests run; see
+// ../roblox-forecast-v12-status.md for the full report):
+//   default, sparse practice history -> MC fallback -25.425188
+//   (p 0.0787, hits 7.80, agr 67.3), byte-identical to v10.
+//   dense simulated final history (~90+ snaps, 1 h gaps) -> STILL the
+//   MC fallback (fitted branch does not trigger), byte-identical to
+//   v10 run with the gate disabled.
+//
+// roblox-up-and-coming-forecast-01 entry v10: PRODUCT-OF-EXPERTS blend
+// of the v8 refined fitted place-occupancy table with the Monte Carlo's
 // full per-place distribution, with the v8 Monte Carlo fallback on
 // sparse history. Rank 1 is robekk "Fitted place-occupancy table" at
 // -13.2 (p 0.2674); rank 2 is achmadb271 "SINDRI Roblox Momentum
@@ -76,7 +83,7 @@ const FIT_WINDOW_H = Number(process.env.FIT_WINDOW_H ?? 72);
 /** Fitted table: recency half-life (hours) for the occupancy weights.
  * 12 h (v8; v7 used 24 h): shorter halflife favours recency, which the
  * held-out harness prefers at every horizon. */
-const FIT_HALFLIFE_H = Number(process.env.FIT_HALFLIFE_H ?? 6);
+const FIT_HALFLIFE_H = Number(process.env.FIT_HALFLIFE_H ?? 12);
 /** Fitted table: Dirichlet shrinkage strength toward the persistence
  * prior (see fittedTable). 20 (v8): on sparse history the prior
  * dominates (good, counts are noise there); on dense history the
@@ -97,8 +104,8 @@ const FIT_TEMP = Number(process.env.FIT_TEMP ?? 0.85);
  * the last place, linearly interpolated. Top places are more concentrated
  * (modal share 0.3-0.7) so they may want less flattening than the
  * diffuse bottom places. NaN (default) = use FIT_TEMP. */
-const FIT_TEMP_HI = Number(process.env.FIT_TEMP_HI ?? 1.5);
-const FIT_TEMP_LO = Number(process.env.FIT_TEMP_LO ?? 0.85);
+const FIT_TEMP_HI = Number(process.env.FIT_TEMP_HI ?? NaN);
+const FIT_TEMP_LO = Number(process.env.FIT_TEMP_LO ?? NaN);
 /** Fitted table: its own unnamed share (the Monte Carlo keeps
  * UNNAMED_HI/LO). The fitted table leaves more unnamed mass at the
  * bottom places (0.25/0.15), where turnover/newcomers are more common;
@@ -124,7 +131,7 @@ const DYN_SIGMA = Number(process.env.DYN_SIGMA ?? 0.5);
  * renormalised per place. v9's kernel tilt uses only the MC's
  * conditional mean rank (one number per game); the PoE uses the MC's
  * whole place distribution (its shape, not just its mean). */
-const POE_W = Number(process.env.POE_W ?? 0.5);
+const POE_W = Number(process.env.POE_W ?? 0.25);
 /** Hybrid horizon (v9): hours ahead for the drift-predicted rank
  * (only used when DYN_SOURCE is "drift"). */
 const DYN_HORIZON_H = Number(process.env.DYN_HORIZON_H ?? 72);
@@ -144,6 +151,14 @@ const DYN_SOURCE = process.env.DYN_SOURCE ?? 'poe';
 const MCORD_PATHS = Number(process.env.MCORD_PATHS ?? 2000);
 /** Force the fitted table even on sparse history (testing only). */
 const FORCE_FIT = Number(process.env.FORCE_FIT ?? 0);
+/** v12: force the Monte Carlo fallback ALWAYS (default 1). When set, the
+ * density gate below is skipped entirely and the fitted table /
+ * product-of-experts branch never runs, no matter how dense the history
+ * is. This is the whole point of v12: the final history WILL be dense
+ * (~90+ snaps, median gap ~1 h), so without this the gate would force
+ * the fitted branch (honest harness -40.47) instead of the MC (-25.425).
+ * FORCE_MC=0 restores v10 exactly (gate + fitted branch), for testing. */
+const FORCE_MC = Number(process.env.FORCE_MC ?? 1);
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -795,7 +810,7 @@ function main(): void {
     for (let i = 1; i < times.length; i++) gaps.push((times[i]! - times[i - 1]!) / 3600000);
     gaps.sort((a, b) => a - b);
     const medGap = gaps.length > 0 ? gaps[Math.floor(gaps.length / 2)]! : Infinity;
-    if (FORCE_FIT || (snaps.length >= DENSE_MIN_SNAPS && medGap <= DENSE_MAX_GAP_H)) {
+    if (!FORCE_MC && (FORCE_FIT || (snaps.length >= DENSE_MIN_SNAPS && medGap <= DENSE_MAX_GAP_H))) {
       // Hybrid (v9): the dynamics ordering tilts the table. Skip the
       // (expensive for "mc") ordering computation when the tilt is off.
       const predLr = HYBRID_BETA !== 0 && DYN_SOURCE !== 'poe' ? dynamicsLogRank(snaps, places, hours) : undefined;
