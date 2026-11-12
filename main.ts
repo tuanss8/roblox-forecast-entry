@@ -1,52 +1,44 @@
-// roblox-up-and-coming-forecast-01 entry v4: Monte Carlo log-rank forecaster
-// with a SPLIT-WINDOW drift: long-window rank momentum + short-window
-// growth momentum.
+// roblox-up-and-coming-forecast-01 entry v5: Monte Carlo log-rank forecaster
+// with split-window drift + breakout detection + sharper calibration.
 //
-// v4 changes vs v3 (practice -31.76, official pending):
-// - GROWTH_HOURS 24: the player-count growth slope is measured over the
-//   last 24 h only, while the rank drift still uses the long 40/84 h
-//   horizons. Diagnosis: v3 gave Sweep The Moon (#29 at close, playing
-//   3.7k -> 45k in ~2 days, #1-3 in most practice reads) essentially
-//   ZERO probability at places 1-5, because the 84 h growth window
-//   diluted its explosive recent playing growth (0.039/h) and the
-//   shrunk rank regression (-0.017/h) could not express a #29 -> #1
-//   climb. A short growth window catches the explosion while the long
-//   rank window keeps stable games honest.
-// - A pure direct growth-rate ranking model (rank by extrapolated
-//   playing, no rank persistence) was built and measured in a Python
-//   prototype: -43.25, far worse than v3. Rank is 0.96 autocorrelated;
-//   discarding the current rank throws away the strongest signal.
-//   v4 therefore keeps the random walk and fixes its climber blind
-//   spot instead of replacing it.
+// v5 changes vs v4 (practice -27.35, p 0.0649; v4 official grading
+// underway at submit time; v3 official rank 28, -31.8, p 0.0418):
+// - BREAKOUT detection (NEW): a game's 8 h growth slope minus its 84 h
+//   baseline slope, when positive (growth accelerating), adds extra
+//   negative drift AFTER the ordinary drift cap (uncapped), so a genuine
+//   viral climber is not held back. BREAKOUT_BETA 0.2 was the sweet spot:
+//   0.1 -26.82, 0.2 -26.70, 0.3 -27.03, 0.5 -28.30, 1.0 -33.04 (the big
+//   values fire on noisy 2-point slopes and scramble the top 10).
+//   It fixes v4's blind spot: Sweep The Moon (rank 29 at close, playing
+//   6.3k -> 45k in the last hours) was the true #1 in 2 practice reads
+//   but v4 gave it only p 0.0126 at place 1.
+// - DRIFT_SCALE 0.6 -> 1.2 and VOL 0.12 -> 0.08: the rank momentum is
+//   real and the distribution was too wide. Joint sweep: DS 0.7 -27.18,
+//   0.8 -27.08, 0.9 -27.17, 1.0 -27.32 (at VOL 0.12); with breakout,
+//   DS 0.85 -26.62, 0.9 -26.57, 1.0 -26.21, 1.1 -26.11, 1.2 -25.98,
+//   1.3 -26.05, 1.4 -26.27 (VOL 0.08-0.09). VOL: 0.11 -26.46, 0.10
+//   -26.31, 0.09 -26.28, 0.08 -25.98, 0.07 -26.05. Peak is DS 1.2 /
+//   VOL 0.08; both directions turn worse past it.
+// - TEMP 1.3 -> 1.35 (small gain with the sharper distribution).
+// - BREAKOUT_BASE_HOURS 84 (vs 48: -26.62 vs -26.70; 24: -27.09).
 //
-// Practice score: -27.35 (typical p 0.0649, hits 7.8, agreement 63.9),
-// confirmed at PATHS=12000 across seeds (spread 0.06). +4.41 over v3
-// (-31.76), +1.65 over the official rank 1 (-29.0), and above the
-// 0.06 typical-probability target (needs -28.13). The gain is broad:
-// v4 beats v3 on 9 of the 10 practice reads, and Sweep The Moon now
-// carries p 0.097-0.104 at places 2-4 (v3 gave it ~0 at places 1-5).
-// Sweep log (practice scorer, PATHS=4000 unless noted): GROWTH_HOURS
-// 24 -32.11, 12 -29.49, 8 -28.48, 6 -28.48, 4 -33.94 (too short: only
-// 1 point in window); HORIZONS 84 alone -28.22 vs 40,84 -28.48;
-// GROWTH_BETA -0.45 -28.17, -0.35 -28.48, -0.5 -28.83; SHRINK_K 6
-// -27.88, 4 -27.73, 3 -27.65, 2 -27.61, 1 -27.61, 0 -27.75;
-// DRIFT_SCALE 0.6 -27.52 (vs 0.5 -27.61); TEMP 1.4 -27.37 (vs 1.3
-// -27.35, a wash); MAX_DRIFT 0.15 -27.96 and 0.08 -28.15 (the 0.10
-// cap matters both ways); VOL 0.10 -28.24, 0.14 -28.33.
-// Negatives carried over from v3 (measured, NOT used): per-game
-// volatility (PGVOL), a flat UNNAMED_SHARE below 0.20, VOL below 0.12,
-// per-place temperature, a conditional drift cap for fast climbers
-// (CAP_HI), explicit mean reversion and a tenure term. Shortening the
-// RANK drift window also hurts (HORIZONS 24 alone: -32.69).
-// Honest limit: two late-window #1/#2 games (Do Not Stop. and
-// 10773926254) never appear in the 34-snapshot history, so no model
-// can name them — only the unnamed share covers them. The final
-// history (hourly house-recorder reads to the deadline) will contain
-// games that joined by then, so the practice loss from true newcomers
-// overstates the final loss somewhat. A pure direct growth-rate
-// ranking model (rank by extrapolated playing, no rank persistence)
-// was prototyped and measured -43.25: rank is 0.96 autocorrelated,
-// so discarding the current rank throws away the strongest signal.
+// Practice score: -25.98 (typical p 0.0744, hits 7.80, agreement 67.3),
+// confirmed at PATHS=12000 across seeds 20261112/1/2 (-25.968/-25.984/
+// -25.980, spread 0.016), deterministic byte-identical per seed.
+// +1.37 over v4 (-27.35), +0.62 over the official rank 1 (-26.6, p
+// 0.0697), and past the user's p_place 0.07 target (-26.59). Still
+// 0.72 short of p_place 0.08 (-25.26); the DS/VOL/breakout knobs have
+// peaked, so 0.08 needs a new idea (v6), not more tuning of these.
+// Negatives (measured, NOT used): CAP_HI 0.15-0.30 -27.96; GROWTH_BETA
+// -0.45/-0.5 worse; GROWTH_HOURS 12 -28.60; TENURE_BETA 0.01 -27.80,
+// 0.02 -28.59 (tenure is dead in this family too); SHRINK_K 1/3 no
+// gain at the optimum; UNNAMED_HI 0.30 -26.62; TEMP 1.4 -26.51.
+// Carried over from v4: off-chart surging games IMPOSSIBLE (late
+// newcomers appear nowhere in history); weekend effect NO SIGNAL;
+// growth-rate ranking prototype -43.25; Do Not Stop. and Bloody Ragdoll
+// Physics never appear in the 34-snapshot history, so no model can name
+// them in practice (the final hourly history will contain them if they
+// joined by the deadline).
 //
 // Deterministic: a seeded PRNG (mulberry32) drives every simulation, so
 // two runs on the same history write byte-identical forecasts. No network,
@@ -65,7 +57,7 @@ const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 /** Monte Carlo paths per horizon. */
 const PATHS = Number(process.env.PATHS ?? 12000);
 /** Per-hour volatility of log(rank). */
-const VOL_PER_HOUR = Number(process.env.VOL ?? 0.12);
+const VOL_PER_HOUR = Number(process.env.VOL ?? 0.08);
 /** Share of every place left unnamed, for games that join the chart during the window. */
 const UNNAMED_SHARE = Number(process.env.UNNAMED ?? 0.2);
 /** Optional per-place unnamed share: UNNAMED_HI at place 1, UNNAMED_LO at
@@ -98,7 +90,7 @@ const MAX_DRIFT = Number(process.env.MAX_DRIFT ?? 0.1);
 const CAP_HI = Number(process.env.CAP_HI ?? MAX_DRIFT);
 const GROWTH_CAP_THRESH = Number(process.env.GROWTH_CAP_THRESH ?? 0.03);
 /** Global multiplier on all drifts (0 = no momentum, 1 = full). */
-const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 0.6);
+const DRIFT_SCALE = Number(process.env.DRIFT_SCALE ?? 1.2);
 /** Growth-momentum coefficient: how much a game's recent player-count
  * growth rate (log playing per hour) shifts its log-rank drift. Negative:
  * a growing game climbs (its log-rank falls). */
@@ -116,7 +108,7 @@ const GROWTH_HOURS = Number(process.env.GROWTH_HOURS ?? 8);
 const T_DOF = Number(process.env.T_DOF ?? 3);
 /** Temperature on the output probabilities (1 = no change). <1 flattens,
  * >1 sharpens. Applied per place, renormalised to the same named total. */
-const TEMP = Number(process.env.TEMP ?? 1.3);
+const TEMP = Number(process.env.TEMP ?? 1.35);
 /** Optional per-place temperature: TEMP_HI applies at place 1, TEMP_LO at
  * the last place, linearly interpolated. When both are set they override
  * TEMP. Use it to sharpen the top places more than the bottom ones. */
@@ -137,6 +129,15 @@ const MR_BETA = Number(process.env.MR_BETA ?? 0);
  * (tenureHours - 72) / 72, with tenure measured from the game's first
  * appearance in the history. 0 disables it. */
 const TENURE_BETA = Number(process.env.TENURE_BETA ?? 0);
+/** Breakout: a game's player-count growth slope over the short window
+ * (GROWTH_HOURS) minus its slope over a longer baseline window
+ * (BREAKOUT_BASE_HOURS). When growth ACCELERATES (recent slope far above
+ * baseline), the game is breaking out — add extra negative drift
+ * (uncapped, applied after the ordinary drift cap) so a genuine viral
+ * climber is not held back. 0 disables it. */
+const BREAKOUT_BETA = Number(process.env.BREAKOUT_BETA ?? 0.2);
+const BREAKOUT_BASE_HOURS = Number(process.env.BREAKOUT_BASE_HOURS ?? 84);
+
 /** PRNG seed. */
 const SEED = Number(process.env.SEED ?? 20261112);
 
@@ -229,7 +230,8 @@ function gameDrift(
   drift *= n / (n + SHRINK_K);
   drift *= DRIFT_SCALE;
   let growthDrift = 0;
-  if (GROWTH_BETA !== 0) {
+  let recentGrowthSlope = 0;
+  if (GROWTH_BETA !== 0 || BREAKOUT_BETA !== 0) {
     const gp = pts.filter((p) => tLast - p.t <= GROWTH_HOURS && Number.isFinite(p.lp));
     if (gp.length >= 2) {
       let gmt = 0;
@@ -246,7 +248,10 @@ function gameDrift(
         gnum += (p.t - gmt) * (p.lp - gmp);
         gden += (p.t - gmt) * (p.t - gmt);
       }
-      if (gden > 0) growthDrift = GROWTH_BETA * (gnum / gden);
+      if (gden > 0) {
+        recentGrowthSlope = gnum / gden;
+        growthDrift = GROWTH_BETA * recentGrowthSlope;
+      }
     }
   }
   drift += growthDrift;
@@ -262,6 +267,33 @@ function gameDrift(
   const cap = growthDrift < -GROWTH_CAP_THRESH ? CAP_HI : MAX_DRIFT;
   if (drift > cap) drift = cap;
   if (drift < -cap) drift = -cap;
+  // Breakout (after the cap, uncapped): growth accelerating vs the game's
+  // own longer-window baseline means it is breaking out right now.
+  if (BREAKOUT_BETA !== 0 && recentGrowthSlope !== 0) {
+    const bp = pts.filter(
+      (p) => tLast - p.t <= BREAKOUT_BASE_HOURS && Number.isFinite(p.lp),
+    );
+    if (bp.length >= 3) {
+      let bmt = 0;
+      let bmp = 0;
+      for (const p of bp) {
+        bmt += p.t;
+        bmp += p.lp;
+      }
+      bmt /= bp.length;
+      bmp /= bp.length;
+      let bnum = 0;
+      let bden = 0;
+      for (const p of bp) {
+        bnum += (p.t - bmt) * (p.lp - bmp);
+        bden += (p.t - bmt) * (p.t - bmt);
+      }
+      if (bden > 0) {
+        const accel = recentGrowthSlope - bnum / bden;
+        if (accel > 0) drift += -BREAKOUT_BETA * accel;
+      }
+    }
+  }
   return drift;
 }
 
